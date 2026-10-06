@@ -1,0 +1,285 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  OPERATOR
+  VIEWER
+}
+
+enum DeviceStatus {
+  PROVISIONING
+  ONLINE
+  OFFLINE
+  DECOMMISSIONED
+}
+
+enum CommandStatus {
+  PENDING
+  SENT
+  ACKNOWLEDGED
+  EXECUTED
+  FAILED
+  TIMEOUT
+}
+
+enum AlertStatus {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+}
+
+enum OtaStatus {
+  PENDING
+  DOWNLOADING
+  INSTALLING
+  SUCCESS
+  FAILED
+}
+
+model User {
+  id            Int            @id @default(autoincrement())
+  email         String         @unique
+  password_hash String
+  name          String
+  role          Role           @default(VIEWER)
+  is_active     Boolean        @default(true)
+  last_login    DateTime?
+  created_at    DateTime       @default(now())
+  updated_at    DateTime       @updatedAt
+
+  RefreshTokens RefreshToken[]
+  AuditLogs     AuditLog[]
+  CommandsSent  DeviceCommand[]
+
+  @@index([email])
+  @@index([role, is_active])
+}
+
+model RefreshToken {
+  id         Int       @id @default(autoincrement())
+  user_id    Int
+  token_hash String
+  expires_at DateTime
+  revoked_at DateTime?
+  created_at DateTime  @default(now())
+
+  User       User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id, revoked_at])
+  @@index([expires_at])
+}
+
+model Device {
+  id                         Int                @id @default(autoincrement())
+  device_uid                 String             @unique
+  name                       String
+  location                   String?
+  timezone                   String             @default("UTC")
+  status                     DeviceStatus       @default(PROVISIONING)
+  firmware_version           String             @default("1.0.0")
+  hardware_model             String             @default("ALGAE-TREE-V1")
+  hardware_revision          String             @default("ESP32-WROOM-32U")
+  rtc_valid                  Boolean            @default(false)
+  last_seen                  DateTime?
+  schedule_revision          Int                @default(1)
+  acknowledged_schedule_rev  Int                @default(0)
+  requested_maintenance_mode Boolean            @default(false)
+  actual_maintenance_mode    Boolean            @default(false)
+  maintenance_started_at     DateTime?
+  maintenance_expires_at     DateTime?
+  maintenance_started_by     Int?
+  created_at                 DateTime           @default(now())
+  updated_at                 DateTime           @updatedAt
+
+  Credential                 DeviceCredential?
+  RelayConfigs               RelayConfig[]
+  RelayStates                RelayState[]
+  Schedules                  Schedule[]
+  Telemetry                  Telemetry[]
+  Alerts                     Alert[]
+  Commands                   DeviceCommand[]
+  AuditLogs                  AuditLog[]
+  OtaUpdates                 OtaUpdate[]
+
+  @@index([device_uid])
+  @@index([status, last_seen])
+  @@index([requested_maintenance_mode, maintenance_expires_at])
+  @@index([schedule_revision, acknowledged_schedule_rev])
+}
+
+model DeviceCredential {
+  id            Int       @id @default(autoincrement())
+  device_id     Int       @unique
+  username      String    @unique
+  password_hash String
+  revoked_at    DateTime?
+  last_used_at  DateTime?
+  created_at    DateTime  @default(now())
+  updated_at    DateTime  @updatedAt
+
+  Device        Device    @relation(fields: [device_id], references: [id], onDelete: Cascade)
+
+  @@index([username, revoked_at])
+}
+
+model RelayConfig {
+  id             Int      @id @default(autoincrement())
+  device_id      Int
+  relay_number   Int
+  name           String
+  enabled        Boolean  @default(true)
+  active_low     Boolean  @default(false)
+  failsafe_state Boolean  @default(false)
+  created_at     DateTime @default(now())
+  updated_at     DateTime @updatedAt
+
+  Device         Device   @relation(fields: [device_id], references: [id], onDelete: Cascade)
+
+  @@unique([device_id, relay_number])
+  @@index([device_id, enabled])
+}
+
+model RelayState {
+  id           Int      @id @default(autoincrement())
+  device_id    Int
+  relay_number Int
+  state        Boolean  @default(false)
+  last_updated DateTime @default(now())
+
+  Device       Device   @relation(fields: [device_id], references: [id], onDelete: Cascade)
+
+  @@unique([device_id, relay_number])
+}
+
+model Schedule {
+  id           Int      @id @default(autoincrement())
+  device_id    Int
+  relay_number Int
+  enabled      Boolean  @default(false)
+  days_of_week Int[]
+  start_time   String
+  end_time     String
+  priority     Int      @default(0)
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+
+  Device       Device   @relation(fields: [device_id], references: [id], onDelete: Cascade)
+
+  @@index([device_id, relay_number, enabled])
+}
+
+model Telemetry {
+  id               Int      @id @default(autoincrement())
+  device_id        Int
+  device_timestamp DateTime
+  received_at      DateTime @default(now())
+  message_id       String?
+  payload          Json
+
+  Device           Device   @relation(fields: [device_id], references: [id], onDelete: Cascade)
+
+  @@unique([device_id, message_id])
+  @@index([device_id, device_timestamp(sort: Desc)])
+  @@index([received_at(sort: Desc)])
+}
+
+model DeviceCommand {
+  id              Int           @id @default(autoincrement())
+  request_id      String        @unique
+  device_id       Int
+  command         String
+  payload         Json
+  status          CommandStatus @default(PENDING)
+  created_by      Int?
+  created_at      DateTime      @default(now())
+  sent_at         DateTime?
+  acknowledged_at DateTime?
+  executed_at     DateTime?
+  failed_at       DateTime?
+  failure_reason  String?
+
+  Device          Device        @relation(fields: [device_id], references: [id], onDelete: Cascade)
+  CreatedBy       User?         @relation(fields: [created_by], references: [id], onDelete: SetNull)
+
+  @@index([device_id, status])
+  @@index([status, created_at])
+  @@index([request_id, status])
+}
+
+model Alert {
+  id             Int         @id @default(autoincrement())
+  device_id      Int
+  type           String
+  severity       String
+  message        String
+  status         AlertStatus @default(OPEN)
+  created_at     DateTime    @default(now())
+  acknowledged_at DateTime?
+  resolved_at    DateTime?
+
+  Device         Device      @relation(fields: [device_id], references: [id], onDelete: Cascade)
+
+  @@index([device_id, status, type])
+  @@index([status, created_at])
+}
+
+model AuditLog {
+  id         Int      @id @default(autoincrement())
+  user_id    Int?
+  device_id  Int?
+  action     String
+  details    Json?
+  created_at DateTime @default(now())
+
+  User       User?    @relation(fields: [user_id], references: [id], onDelete: SetNull)
+  Device     Device?  @relation(fields: [device_id], references: [id], onDelete: SetNull)
+
+  @@index([created_at(sort: Desc)])
+  @@index([device_id, created_at(sort: Desc)])
+  @@index([user_id, created_at(sort: Desc)])
+  @@index([action, created_at(sort: Desc)])
+}
+
+model Firmware {
+  id                 Int         @id @default(autoincrement())
+  version            String
+  target_model       String
+  min_hardware_rev   String
+  checksum_sha256    String
+  download_url       String
+  is_published       Boolean     @default(false)
+  release_notes      String?
+  created_at         DateTime    @default(now())
+
+  OtaUpdates         OtaUpdate[]
+
+  @@unique([version, target_model])
+  @@index([target_model, is_published])
+}
+
+model OtaUpdate {
+  id             Int       @id @default(autoincrement())
+  request_id     String    @unique
+  device_id      Int
+  firmware_id    Int
+  target_version String
+  status         OtaStatus @default(PENDING)
+  progress       Int       @default(0)
+  error_message  String?
+  created_at     DateTime  @default(now())
+  updated_at     DateTime  @updatedAt
+
+  Device         Device    @relation(fields: [device_id], references: [id], onDelete: Cascade)
+  Firmware       Firmware  @relation(fields: [firmware_id], references: [id], onDelete: Restrict)
+
+  @@index([device_id, status])
+  @@index([status, created_at])
+}
